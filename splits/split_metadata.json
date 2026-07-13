@@ -1,0 +1,24 @@
+{
+  "created_at_utc": "2026-07-12T14:40:30.963798+00:00",
+  "seed": 42,
+  "protocol": {
+    "training": "All verified official SALICON training pairs",
+    "validation": "First 2500 IDs after deterministic shuffle of verified official-validation IDs",
+    "test": "Remaining 2500 IDs after deterministic shuffle of verified official-validation IDs",
+    "official_test_used": false
+  },
+  "counts": {
+    "train": 10000,
+    "val": 2500,
+    "test": 2500
+  },
+  "sha256": {
+    "train.txt": "13d7d6274da777423400b233268f8d11c7ca105e84b19bd834587d5f999d0d8b",
+    "val.txt": "917e17d3d767b14cbddedc1777450efcbb51b099f827a0c0e759993103373736",
+    "test.txt": "010d70bc65641017a75dac2c84011905edcd8a94fd3948b75c99339139edd5cf",
+    "dataset_manifest.csv": "4c4bfbe639fe27da91308c1815a9157670244a79117f9e070192096464a529d9",
+    "train_manifest.csv": "44e19da760379d370840eadc177219519fe8b2be72fed122e961928941ae82a6",
+    "val_manifest.csv": "4be6e4697519c4f316bea58e31c5f5a982072b53eb7c9c4e4d3fd985e535ca0f",
+    "test_manifest.csv": "c904d4c9e51aa00b5cc866541c3fde77b0799c9cd986963f134b9bda02d90131"
+  }
+}

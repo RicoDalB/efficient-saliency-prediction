@@ -1,0 +1,34 @@
+{
+  "created_at_utc": "2026-07-12T14:40:31.032496+00:00",
+  "dataset_root": "/content/drive/MyDrive/saliency_project/data/SALICON",
+  "raw_download": {
+    "total_files": 55000,
+    "total_size_gb": 3.97,
+    "jpg_files": 20000,
+    "png_files": 15000,
+    "mat_files": 20000
+  },
+  "verified_labelled_pairs": {
+    "official_train": 10000,
+    "official_val": 5000,
+    "total": 15000
+  },
+  "pairing_errors": {
+    "duplicate_train_image_ids": 0,
+    "duplicate_train_map_ids": 0,
+    "duplicate_val_image_ids": 0,
+    "duplicate_val_map_ids": 0
+  },
+  "project_split": {
+    "seed": 42,
+    "train": 10000,
+    "val": 2500,
+    "test": 2500,
+    "official_test_used": false
+  },
+  "saved_outputs": {
+    "contact_sheet": "/content/drive/MyDrive/saliency_project/outputs/figures/data_contact_sheet.png",
+    "dataset_manifest": "/content/drive/MyDrive/saliency_project/splits/dataset_manifest.csv",
+    "split_metadata": "/content/drive/MyDrive/saliency_project/splits/split_metadata.json"
+  }
+}
