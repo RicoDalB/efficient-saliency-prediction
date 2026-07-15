@@ -1,0 +1,1 @@
+"""Neural Network architectues for visual saliency prediction."""

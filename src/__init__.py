@@ -1,0 +1,1 @@
+"""Efficent visual sailency prediction package."""

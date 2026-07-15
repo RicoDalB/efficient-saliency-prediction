@@ -1,0 +1,1 @@
+"""Loss function and evaluation metrics for saliency prediction."""
