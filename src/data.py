@@ -209,7 +209,7 @@ def build_dataloader(dataset: Dataset, batch_size: int, shuffle: bool,
     if batch_size <= 0:
         raise ValueError("batch_size must be grather than zero")
     
-    if num_workers <= 0:
+    if num_workers < 0:
         raise ValueError("num_workers cannot be negative")
     
     # Generator control random order used when shuffle = True
