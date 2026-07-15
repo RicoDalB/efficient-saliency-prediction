@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Dataset loading, preprocessing, and DataLoader utilities for SALICON"""
 
 """
@@ -47,7 +48,6 @@ return one training sample
 """
 
 
-from __future__ import annotations
 import random
 from functools import lru_cache
 from pathlib import Path 
