@@ -68,7 +68,7 @@ class MobileNetV2Encoder(nn.Module):
             if key is not None:
                 outputs[key] = x
 
-        if set(outputs) != set(self.out_channles):
+        if set(outputs) != set(self.out_channels):
             raise RuntimeError("MobileNetV2 feature are incomplete")
         
         return outputs
