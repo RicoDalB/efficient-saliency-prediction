@@ -109,7 +109,7 @@ reduction -> mean / none
 Returns -> Scalar tensor for "mean", tensor with shape [B] for "none"
 ----------------------------
 """
-def correlation_coefficent(prediction: Tensor, target: Tensor, *, epsilon: float = EPSILON, reduction: Reduction = "mean", ) -> Tensor:
+def correlation_coefficient(prediction: Tensor, target: Tensor, *, epsilon: float = EPSILON, reduction: Reduction = "mean", ) -> Tensor:
 
     _check_pair(prediction, target)
     prediction_flat = prediction.float().flatten(start_dim=1)
@@ -179,7 +179,7 @@ def saliency_loss(logits: Tensor, target: Tensor, *, cc_weight: float = 0.5, eps
     # Stable computation of KLD 
     per_image_kld = (target_flat * (torch.log(target_flat + epsilon) - log_prediction_flat)).sum(dim=1)
 
-    per_image_cc = correlation_coefficent(prediction, target_float, epsilon=epsilon, reduction="none",)
+    per_image_cc = correlation_coefficient(prediction, target_float, epsilon=epsilon, reduction="none",)
 
     per_image_loss = (per_image_kld + cc_weight * (1.0 - per_image_cc))
 
