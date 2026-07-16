@@ -30,7 +30,7 @@ def _group_count(channels: int, preferred_group: int = 8) -> int:
 class MobileNetV2Encoder(nn.Module):
     # MovileNetV2 is designed for image classification, out one class vector, for Sailency we do not need the classification head
     # so we colletc features map from four different depths of network
-    out_channles = {
+    out_channels = {
         "s4": 24,
         "s8": 32,
         "s16": 96,
@@ -76,7 +76,7 @@ class MobileNetV2Encoder(nn.Module):
 
 # Heavier feature extractor, larger than mobile, return the same four-scale interface
 class ResNet18Encoder(nn.Module):
-    out_channels =  {
+    out_channels = {
         "s4": 64,
         "s8": 128,
         "s16": 256,
