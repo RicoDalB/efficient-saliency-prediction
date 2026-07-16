@@ -164,7 +164,7 @@ class RefinementBlock(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def farward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.block(x)
     
 
