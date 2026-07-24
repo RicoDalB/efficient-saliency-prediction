@@ -305,7 +305,7 @@ class MultiScaleDecoder(nn.Module):
         )
 
     # Unsample a deep feature and add a same-scale skip feature. Lateral is projected encoder feature from shallower stage, more spatial details
-    def _unsample_add(self, x: Tensor, lateral: Tensor) -> Tensor:
+    def _upsample_add(self, x: Tensor, lateral: Tensor) -> Tensor:
         x = F.interpolate(x, size=lateral.shape[-2:], mode="bilinear", align_corners=False)
 
         # Add two tensor elem by elem
