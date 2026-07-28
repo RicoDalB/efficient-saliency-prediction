@@ -1,15 +1,8 @@
 from __future__ import annotations
+# Losses, metrics, and spatial-distribution utilities for saliency prediction
 
-"""Project tensor contract
------------------------
-- Model output: raw logits with shape [B, 1, H, W].
-- Dataset target: non-negative saliency distribution with shape
-  [B, 1, H, W].
-- Every target map is already normalized in ``src.data`` so that
-  its pixels sum to 1.
-- Metrics receive probability distributions, not raw logits.
-"""
 from typing import Literal
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -17,7 +10,7 @@ from torch import Tensor
 EPSILON = 1e-8
 Reduction = Literal["mean", "none"]
 
-# Check the structural contract of a batched saliency tensor.
+# Check the expected [B, 1, H, W] saliency-map shape
 def _check_map_tensor(maps: Tensor, name: str ) -> None:
     if maps.ndim != 4:
         raise ValueError(f"{name} must have shape [B, 1, H, W], " f"but received {tuple(maps.shape)}.")
@@ -34,7 +27,7 @@ def _check_pair(prediction: Tensor, target: Tensor,) -> None:
         raise ValueError("Prediciton and target must have same shape:" f"Prediction: {tuple(prediction.shape)}" f"Target: {tuple(target.shape)}.")
     
 
-# Redcuce one metric value per image to the requested output
+# Apply metric reduction
 def _reduce(values: Tensor, reduction: Reduction,) -> Tensor:
     if reduction == "none": return values
     if reduction == "mean": return values.mean()
@@ -58,8 +51,6 @@ def validate_spatial_distribution(maps: Tensor, *, name: str = "maps", atol: flo
     
 
 # Convert Raw logits into log-probabilities over image location
-# Softmax applied to every image indipendently
-# logits -> raw model output, Log-Prob -> return with same shape of logits
 def spatial_log_softmax(logits: Tensor,) -> Tensor:
     _check_map_tensor(logits, "logits")
     original_shape = logits.shape
@@ -74,18 +65,7 @@ def spatial_softmax(logits: Tensor, ) -> Tensor:
     return spatial_log_softmax(logits).exp()
 
 
-"""Compute 
---- KLD(target || prediction) ---
-Both tensor must already be valid spatial probability distribution.
-Lower values are better.
----------------------------
-prediction -> predicted prob maps 
-target -> Ground-truth prob maps 
-epsilon -> small value preventing log of 0
-reduction -> mean / none
-Returns -> Scalar tensor for "mean", tensor with shape [B] for "none"
-----------------------------
-"""
+# Compute KLD(target || prediction). Lower values better
 def kld_divergence(prediction: Tensor, target: Tensor, *, epsilon: float = EPSILON, reduction: Reduction = "mean", ) -> Tensor:
     
     _check_pair(prediction, target)
@@ -97,18 +77,7 @@ def kld_divergence(prediction: Tensor, target: Tensor, *, epsilon: float = EPSIL
     return _reduce(per_image_kld, reduction,)
 
 
-"""
---- Pearson Correlation Coeffienct ---
-Computer per image, Higer value better.
-Const map recives a score of zero becouse its spatial variance is zero
----------------------------
-prediction -> predicted prob maps 
-target -> Ground-truth prob maps 
-epsilon -> small value preventing log of 0
-reduction -> mean / none
-Returns -> Scalar tensor for "mean", tensor with shape [B] for "none"
-----------------------------
-"""
+# Compute the Pearson Correlation Coeffienct for each image
 def correlation_coefficient(prediction: Tensor, target: Tensor, *, epsilon: float = EPSILON, reduction: Reduction = "mean", ) -> Tensor:
 
     _check_pair(prediction, target)
@@ -126,18 +95,7 @@ def correlation_coefficient(prediction: Tensor, target: Tensor, *, epsilon: floa
     return _reduce(per_image_cc, reduction,)
 
 
-
-"""
-Similarity Score
-Compute histogram-intersection similarity
-Both tensor must already be valid spatial probability distributions
-Higher values better -> perfect match SIM = 1
-------------------------
-predictions -> predicted prob maps 
-target -> Ground-truth prob maps 
-reduction -> mean / none
-Return -> Scalar tensor for "mean", tensor with shape [B] for "none"
-"""
+# Compute histogram-intersection similarit
 def similarity_score(prediction: Tensor, target: Tensor, *, reduction: Reduction = "mean",) -> Tensor:
     _check_pair(prediction, target)
     prediction_flat = prediction.float().flatten(start_dim=1)
@@ -148,22 +106,7 @@ def similarity_score(prediction: Tensor, target: Tensor, *, reduction: Reduction
     return _reduce(per_image_similarity, reduction,)
     
 
-"""
-Compute training objective for all neural models
----
-loss = KLD(target||prediction) + cc_weight * (1 - CC(prediction, target))
----
-target already normalized, raw model logits converted in spatial probability distribution
-Log-Softmax is used directly for the KLD term to improve numerical stability
----------------------------
-logits -> raw model output 
-target -> Ground-truth prob maps 
-cc_weight -> weight assigned to the corrrelation component
-epsilon -> small value preventing log of 0
-reduction -> mean / none
-Returns -> Scalar tensor for "mean", tensor with shape [B] for "none"
-----------------------------
-"""
+# Compute the shared KLD and correlation training objective
 def saliency_loss(logits: Tensor, target: Tensor, *, cc_weight: float = 0.5, epsilon: float = EPSILON, reduction: Reduction = "mean",) -> Tensor:
 
     _check_pair(logits, target)

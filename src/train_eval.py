@@ -1,46 +1,6 @@
 from __future__ import annotations
+# Training and evaluation helpers shared by all saliency models
 
-"""
-Shared training and evaluation utilities for the Efficient Saliency Prediction project.
-
-This module is intentionally model-independent.  The same functions are used for:
-
-- Light-S: MobileNetV2 + single-scale decoder;
-- Light-M: MobileNetV2 + multi-scale decoder;
-- Heavy-M: ResNet-18 + the same multi-scale decoder.
-
-Project tensor contract
------------------------
-Input batch
-    batch["image"]  -> float tensor [B, 3, H, W]
-    batch["target"] -> float tensor [B, 1, H, W], non-negative, sum = 1 per image
-    batch["sample_id"] -> sample identifiers
-
-Model output
-    raw logits [B, 1, H, W]
-
-Loss and metrics
-    src.losses_metrics converts logits to a spatial probability distribution.
-    KLD is lower-is-better.
-    CC and SIM are higher-is-better.
-
-Main responsibilities of this file
-----------------------------------
-1. Build one AdamW optimizer with separate encoder and decoder learning rates.
-2. Train one epoch with optional automatic mixed precision and gradient clipping.
-3. Validate or test a model using KLD, CC, and SIM.
-4. Save best.pt and last.pt checkpoints directly to persistent storage.
-5. Resume interrupted Colab training from a checkpoint.
-6. Save an epoch-level CSV history.
-7. Plot training/validation lines after every epoch to monitor overfitting.
-8. Save one fixed validation-prediction panel after every epoch.
-9. Apply early stopping using validation CC.
-
-The functions contain explicit validation and comments because correctness and
-reproducibility are more important than making this file as short as possible.
-"""
-
-import json
 import math
 import os
 import subprocess
@@ -67,59 +27,18 @@ from src.losses_metrics import (
 )
 
 
-# ImageNet statistics are repeated here only for visualization.  The Dataset
-# performs the real normalization before data enter the model.
+# Used only to undo ImageNet normalization in prediction panels.
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 
-# =============================================================================
-# FUNCTION SCOPE: Convert a path-like input into a Path and create its parent.
-#
-# Parameters
-# ----------
-# path:
-#     A string or pathlib.Path pointing to a file that will be written.
-#
-# Returns
-# -------
-# pathlib.Path
-#     The normalized Path object.  Its parent directory is guaranteed to exist.
-#
-# Why this function exists
-# ------------------------
-# Colab sessions frequently start from an empty temporary runtime.  Checkpoint,
-# metric, and figure directories therefore cannot be assumed to exist.  Using
-# one helper prevents every saving function from repeating the same directory
-# creation logic.
-# =============================================================================
+# File and runtime helpers
 def _prepare_output_file(path: str | Path) -> Path:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     return output_path
 
 
-# =============================================================================
-# FUNCTION SCOPE: Read the exact Git commit currently checked out in the repo.
-#
-# Parameters
-# ----------
-# repo_root:
-#     Root directory of the cloned Git repository.  When None, no lookup is
-#     attempted.
-#
-# Returns
-# -------
-# str | None
-#     The full Git commit hash, or None when Git information is unavailable.
-#
-# Why this function exists
-# ------------------------
-# A checkpoint should identify the source-code version that produced it.  This
-# makes experiments reproducible and helps detect a checkpoint trained with old
-# model or loss code.  Failure to obtain a commit must not stop training, so the
-# function returns None instead of raising an exception.
-# =============================================================================
 def get_git_commit(repo_root: str | Path | None) -> str | None:
     if repo_root is None:
         return None
@@ -142,26 +61,6 @@ def get_git_commit(repo_root: str | Path | None) -> str | None:
     return commit or None
 
 
-# =============================================================================
-# FUNCTION SCOPE: Convert configuration values into checkpoint-safe values.
-#
-# Parameters
-# ----------
-# value:
-#     Any configuration value.  Common examples are Path, torch.device, NumPy
-#     scalar types, lists, dictionaries, integers, floats, and strings.
-#
-# Returns
-# -------
-# Any
-#     A recursively simplified representation made from standard Python types.
-#
-# Why this function exists
-# ------------------------
-# torch.save can serialize many Python objects, but simple dictionaries are far
-# easier to inspect and reuse.  This helper avoids storing environment-specific
-# objects such as pathlib.Path or torch.device directly in the experiment config.
-# =============================================================================
 def _to_serializable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -178,26 +77,6 @@ def _to_serializable(value: Any) -> Any:
     return str(value)
 
 
-# =============================================================================
-# FUNCTION SCOPE: Save a PyTorch object atomically to reduce corruption risk.
-#
-# Parameters
-# ----------
-# payload:
-#     The dictionary or object that torch.save must serialize.
-# path:
-#     Final checkpoint destination, normally best.pt or last.pt on Google Drive.
-#
-# Returns
-# -------
-# None
-#
-# Why this function exists
-# ------------------------
-# A Colab runtime may disconnect while a checkpoint is being written.  Writing
-# first to a temporary file and then replacing the destination makes it much
-# less likely that an existing valid checkpoint is replaced by a partial file.
-# =============================================================================
 def _atomic_torch_save(payload: Any, path: str | Path) -> None:
     final_path = _prepare_output_file(path)
     temporary_path = final_path.with_suffix(final_path.suffix + ".tmp")
@@ -205,25 +84,6 @@ def _atomic_torch_save(payload: Any, path: str | Path) -> None:
     os.replace(temporary_path, final_path)
 
 
-# =============================================================================
-# FUNCTION SCOPE: Create an AMP GradScaler compatible with recent and older PyTorch.
-#
-# Parameters
-# ----------
-# enabled:
-#     True only when CUDA automatic mixed precision should be active.
-#
-# Returns
-# -------
-# GradScaler-like object
-#     An object exposing scale(), unscale_(), step(), and update().
-#
-# Why this function exists
-# ------------------------
-# Newer PyTorch versions use torch.amp.GradScaler("cuda", ...), while older
-# versions use torch.cuda.amp.GradScaler(...).  Colab changes PyTorch versions
-# over time, so this small compatibility layer keeps the project portable.
-# =============================================================================
 def _make_grad_scaler(enabled: bool):
     try:
         return torch.amp.GradScaler("cuda", enabled=enabled)
@@ -231,54 +91,12 @@ def _make_grad_scaler(enabled: bool):
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
-# =============================================================================
-# FUNCTION SCOPE: Open the correct automatic-mixed-precision context.
-#
-# Parameters
-# ----------
-# device:
-#     Device on which the model runs.
-# enabled:
-#     Requested AMP setting from the training configuration.
-#
-# Returns
-# -------
-# Context manager
-#     CUDA autocast when CUDA AMP is active, otherwise a no-operation context.
-#
-# Why this function exists
-# ------------------------
-# AMP should be used only on CUDA in this project.  CPU and environments without
-# CUDA must follow the same training code without raising an autocast error.
-# =============================================================================
 def _autocast_context(device: torch.device, enabled: bool):
     if enabled and device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.float16)
     return nullcontext()
 
-
-# =============================================================================
-# FUNCTION SCOPE: Validate and move one DataLoader batch to the selected device.
-#
-# Parameters
-# ----------
-# batch:
-#     Dictionary produced by SaliconDataset/DataLoader.  It must contain
-#     "image" and "target" tensors.  Other metadata remain on the CPU.
-# device:
-#     CPU or CUDA device used by the model.
-#
-# Returns
-# -------
-# tuple[Tensor, Tensor]
-#     images with shape [B, 3, H, W] and targets with shape [B, 1, H, W].
-#
-# Why this function exists
-# ------------------------
-# Every training and evaluation pass needs the same validation and transfer
-# logic.  A single helper makes shape errors fail early with understandable
-# messages instead of causing a less clear error deep inside the model.
-# =============================================================================
+# Batch handling
 def _move_batch_to_device(
     batch: Mapping[str, Any],
     device: torch.device,
@@ -312,29 +130,6 @@ def _move_batch_to_device(
     return images, targets
 
 
-# =============================================================================
-# FUNCTION SCOPE: Convert the batch sample identifiers into a simple string list.
-#
-# Parameters
-# ----------
-# batch:
-#     DataLoader batch dictionary.
-# batch_size:
-#     Number of images in the current batch.
-# running_start_index:
-#     Index used only when sample IDs are absent, so generated IDs remain unique.
-#
-# Returns
-# -------
-# list[str]
-#     Exactly one identifier for each sample in the batch.
-#
-# Why this function exists
-# ------------------------
-# Final evaluation needs per-image scores to select median, worst, and off-centre
-# examples.  DataLoader collation may represent identifiers as a list, tuple,
-# tensor, or scalar.  This helper converts all common forms to stable strings.
-# =============================================================================
 def _extract_sample_ids(
     batch: Mapping[str, Any],
     batch_size: int,
@@ -366,26 +161,7 @@ def _extract_sample_ids(
     return [str(value) for value in values]
 
 
-# =============================================================================
-# FUNCTION SCOPE: Enable or disable gradient updates for the entire encoder.
-#
-# Parameters
-# ----------
-# model:
-#     A project model exposing model.encoder.
-# trainable:
-#     True to fine-tune encoder weights; False to freeze them.
-#
-# Returns
-# -------
-# None
-#
-# Why this function exists
-# ------------------------
-# The initial protocol freezes the pretrained encoder during the first epoch so
-# the randomly initialized decoder can stabilize.  Later epochs unfreeze the
-# encoder and fine-tune it with the lower encoder learning rate.
-# =============================================================================
+# Enable or disable gradient updates for the entire encoder.
 def set_encoder_trainable(model: nn.Module, trainable: bool) -> None:
     if not hasattr(model, "encoder"):
         raise AttributeError("The model must expose an 'encoder' module.")
@@ -394,25 +170,7 @@ def set_encoder_trainable(model: nn.Module, trainable: bool) -> None:
         parameter.requires_grad = trainable
 
 
-# =============================================================================
-# FUNCTION SCOPE: Keep encoder BatchNorm running statistics fixed during training.
-#
-# Parameters
-# ----------
-# model:
-#     A project model exposing model.encoder.
-#
-# Returns
-# -------
-# None
-#
-# Why this function exists
-# ------------------------
-# MobileNetV2 and ResNet-18 contain BatchNorm layers trained on ImageNet.  Small
-# saliency batches can produce noisy running means and variances.  Calling eval()
-# only on BatchNorm layers freezes their running statistics while still allowing
-# convolution and affine BatchNorm parameters to receive gradients.
-# =============================================================================
+# Keep encoder BatchNorm running statistics fixed during training.
 def freeze_encoder_batchnorm_statistics(model: nn.Module) -> None:
     if not hasattr(model, "encoder"):
         raise AttributeError("The model must expose an 'encoder' module.")
@@ -422,31 +180,7 @@ def freeze_encoder_batchnorm_statistics(model: nn.Module) -> None:
             module.eval()
 
 
-# =============================================================================
-# FUNCTION SCOPE: Build the shared AdamW optimizer with two learning-rate groups.
-#
-# Parameters
-# ----------
-# model:
-#     A project model exposing model.encoder and model.decoder.
-# encoder_lr:
-#     Learning rate used for ImageNet-pretrained encoder parameters.
-# decoder_lr:
-#     Learning rate used for the newly initialized saliency decoder.
-# weight_decay:
-#     AdamW weight-decay coefficient applied to both parameter groups.
-#
-# Returns
-# -------
-# torch.optim.AdamW
-#     Optimizer with named "encoder" and "decoder" parameter groups.
-#
-# Why this function exists
-# ------------------------
-# Pretrained encoder features should change more cautiously than the new decoder.
-# Naming the groups also lets the CSV history record both learning rates clearly.
-# All three models must use this same optimizer policy for a fair comparison.
-# =============================================================================
+# Build the shared AdamW optimizer with two learning-rate groups.
 def build_optimizer(
     model: nn.Module,
     *,
@@ -486,25 +220,7 @@ def build_optimizer(
     )
 
 
-# =============================================================================
-# FUNCTION SCOPE: Read the current encoder and decoder learning rates.
-#
-# Parameters
-# ----------
-# optimizer:
-#     Optimizer created by build_optimizer.  Other optimizers are accepted, but
-#     unnamed groups will be reported as group_0, group_1, and so on.
-#
-# Returns
-# -------
-# dict[str, float]
-#     Mapping from parameter-group name to current learning rate.
-#
-# Why this function exists
-# ------------------------
-# Every epoch history row should record the actual learning rates used.  This is
-# essential when resuming a run or introducing a scheduler later.
-# =============================================================================
+# Read the current encoder and decoder learning rates.
 def get_learning_rates(optimizer: Optimizer) -> dict[str, float]:
     learning_rates: dict[str, float] = {}
     for index, group in enumerate(optimizer.param_groups):
@@ -513,43 +229,7 @@ def get_learning_rates(optimizer: Optimizer) -> dict[str, float]:
     return learning_rates
 
 
-# =============================================================================
-# FUNCTION SCOPE: Train the model for exactly one complete epoch.
-#
-# Parameters
-# ----------
-# model:
-#     Light-S, Light-M, or Heavy-M model returning raw saliency logits.
-# dataloader:
-#     Training DataLoader.  It should use shuffle=True.
-# optimizer:
-#     Shared AdamW optimizer.
-# device:
-#     CPU or CUDA device.
-# scaler:
-#     GradScaler created once before the epoch loop.
-# use_amp:
-#     Enables CUDA automatic mixed precision when CUDA is available.
-# gradient_clip_norm:
-#     Maximum global gradient norm.  Use None to disable clipping.
-# freeze_batchnorm:
-#     When True, encoder BatchNorm running statistics remain fixed.
-#
-# Returns
-# -------
-# dict[str, float]
-#     Average training loss, number of processed samples, batch count, and time.
-#
-# What happens inside
-# -------------------
-# 1. The model enters training mode.
-# 2. Every batch is moved to the selected device.
-# 3. The model produces raw logits.
-# 4. saliency_loss computes KLD + 0.5 * (1 - CC).
-# 5. Gradients are back-propagated with optional mixed precision.
-# 6. Gradients are optionally clipped and optimizer weights are updated.
-# 7. Loss is accumulated per sample, not merely averaged across batches.
-# =============================================================================
+# Train the model for exactly one complete epoch.
 def train_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
@@ -630,35 +310,7 @@ def train_one_epoch(
     }
 
 
-# =============================================================================
-# FUNCTION SCOPE: Evaluate a model on validation or test data without gradients.
-#
-# Parameters
-# ----------
-# model:
-#     Trained or partially trained project model.
-# dataloader:
-#     Validation or test DataLoader.  It should use shuffle=False.
-# device:
-#     CPU or CUDA device.
-# use_amp:
-#     Enables CUDA autocast during inference when available.
-# return_per_image:
-#     When True, also return one KLD/CC/SIM/loss record for every sample.
-#
-# Returns
-# -------
-# tuple[dict[str, float], list[dict[str, Any]]]
-#     First element: dataset-level mean loss, KLD, CC, SIM, sample count, and time.
-#     Second element: optional per-image records used for qualitative selection and
-#     centre-bias analysis.  It is an empty list when return_per_image=False.
-#
-# What happens inside
-# -------------------
-# The function converts logits to spatial probabilities, evaluates all metrics
-# per image, and accumulates exact sample-weighted means.  It never modifies the
-# model or optimizer and can therefore be reused for validation and final testing.
-# =============================================================================
+# Evaluate a model on validation or test data without gradients.
 @torch.inference_mode()
 def evaluate_model(
     model: nn.Module,
@@ -694,8 +346,7 @@ def evaluate_model(
                 f"logits={tuple(logits.shape)}, targets={tuple(targets.shape)}."
             )
 
-        # Metric functions operate in float32 for numerical stability.  The
-        # project prediction is one probability distribution over all H*W pixels.
+        # Metric functions operate in float32 for numerical stability. 
         prediction = spatial_softmax(logits)
         validate_spatial_distribution(prediction, name="prediction")
 
@@ -756,43 +407,7 @@ def evaluate_model(
     return summary, per_image_records
 
 
-# =============================================================================
-# FUNCTION SCOPE: Save a complete recoverable training checkpoint.
-#
-# Parameters
-# ----------
-# path:
-#     Destination .pt file.
-# model:
-#     Current model.
-# optimizer:
-#     Current optimizer, including its momentum and parameter-group state.
-# scaler:
-#     AMP GradScaler, whose state is needed for exact continuation.
-# epoch:
-#     Completed epoch number, using human-readable numbering starting at 1.
-# best_val_cc:
-#     Best validation CC observed up to this epoch.
-# epochs_without_improvement:
-#     Current early-stopping counter.
-# history:
-#     All epoch history rows accumulated so far.
-# config:
-#     Experiment configuration dictionary.
-# split_seed:
-#     Seed used to create or load the deterministic data split.
-# git_commit:
-#     Exact source-code revision, when available.
-#
-# Returns
-# -------
-# None
-#
-# Why this function exists
-# ------------------------
-# Saving only model weights is insufficient for interrupted Colab runs.  This
-# checkpoint contains everything required to continue training consistently.
-# =============================================================================
+# Save a complete recoverable training checkpoint.
 def save_checkpoint(
     path: str | Path,
     *,
@@ -823,35 +438,7 @@ def save_checkpoint(
     _atomic_torch_save(checkpoint, path)
 
 
-# =============================================================================
-# FUNCTION SCOPE: Load a checkpoint into model, optimizer, and AMP scaler.
-#
-# Parameters
-# ----------
-# path:
-#     Existing checkpoint file.
-# model:
-#     Model instance with architecture matching the checkpoint.
-# device:
-#     Device used to remap checkpoint tensors.
-# optimizer:
-#     Optional optimizer to restore.  Pass None for evaluation-only loading.
-# scaler:
-#     Optional AMP scaler to restore.
-# strict:
-#     Passed to model.load_state_dict.  Keep True for normal project use.
-#
-# Returns
-# -------
-# dict[str, Any]
-#     The full checkpoint dictionary, including epoch, history, and best metric.
-#
-# Why this function exists
-# ------------------------
-# It provides one reliable path for both resuming training and loading best.pt
-# during final evaluation.  Architecture mismatches remain visible because strict
-# loading is enabled by default.
-# =============================================================================
+# Load a checkpoint into model, optimizer, and AMP scaler.
 def load_checkpoint(
     path: str | Path,
     *,
@@ -865,10 +452,6 @@ def load_checkpoint(
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    # PyTorch 2.6+ defaults to weights_only=True.  This checkpoint also stores
-    # optimizer state, history, and configuration, so explicitly request the full
-    # trusted project checkpoint.  The fallback keeps compatibility with older
-    # PyTorch versions that do not expose the weights_only argument.
     try:
         checkpoint = torch.load(
             checkpoint_path,
@@ -885,8 +468,7 @@ def load_checkpoint(
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-        # Optimizer tensors loaded from a CPU-mapped checkpoint may need explicit
-        # movement to the current CUDA device before the next optimizer step.
+
         for state in optimizer.state.values():
             for key, value in state.items():
                 if isinstance(value, Tensor):
@@ -898,27 +480,7 @@ def load_checkpoint(
     return checkpoint
 
 
-# =============================================================================
-# FUNCTION SCOPE: Save the complete epoch history as a machine-readable CSV.
-#
-# Parameters
-# ----------
-# history:
-#     Sequence of epoch dictionaries produced by fit_model.
-# path:
-#     CSV destination, such as light_single_history.csv.
-#
-# Returns
-# -------
-# pathlib.Path
-#     Final CSV path.
-#
-# Why this function exists
-# ------------------------
-# The report figures and tables should be regenerated from saved numerical data,
-# not from notebook memory.  Writing after every epoch also protects the history
-# if the Colab session disconnects before training finishes.
-# =============================================================================
+# Save the complete epoch history as a machine-readable CSV.
 def save_history_csv(
     history: Sequence[Mapping[str, Any]],
     path: str | Path,
@@ -932,34 +494,7 @@ def save_history_csv(
     return output_path
 
 
-# =============================================================================
-# FUNCTION SCOPE: Plot all epoch lines needed to monitor convergence/overfitting.
-#
-# Parameters
-# ----------
-# history:
-#     Epoch dictionaries.  Required keys are epoch, train_loss, val_loss,
-#     val_kld, val_cc, and val_sim.
-# output_path:
-#     Optional PNG/PDF destination.  The same path is overwritten each epoch so
-#     it always contains the newest complete curves.
-# show:
-#     True to display the figure in Colab after every epoch.
-# title:
-#     Optional model-specific title such as "Light-S training history".
-#
-# Returns
-# -------
-# matplotlib.figure.Figure
-#     The created figure.  It is also saved and/or displayed as requested.
-#
-# How to read the lines
-# ---------------------
-# - Healthy learning: train and validation loss decrease; validation CC/SIM rise.
-# - Possible overfitting: train loss keeps decreasing while validation loss rises
-#   or validation CC/SIM stop improving.
-# - Underfitting or optimization failure: both losses remain high and nearly flat.
-# =============================================================================
+# Plot all epoch lines needed to monitor convergence/overfitting.
 def plot_training_history(
     history: Sequence[Mapping[str, Any]],
     *,
@@ -1024,39 +559,7 @@ def plot_training_history(
     return figure
 
 
-# =============================================================================
-# FUNCTION SCOPE: Save a fixed qualitative validation panel for the current model.
-#
-# Parameters
-# ----------
-# model:
-#     Current model at the end of an epoch.
-# preview_batch:
-#     One fixed batch taken once from the validation loader before training.  It
-#     must not change between epochs, otherwise visual progress is not comparable.
-# device:
-#     Model device.
-# output_path:
-#     Figure destination.  It is updated after every epoch.
-# max_samples:
-#     Maximum number of image/target/prediction rows to display.
-# use_amp:
-#     Enables CUDA autocast during the preview forward pass.
-# title:
-#     Optional title including model name and epoch.
-#
-# Returns
-# -------
-# matplotlib.figure.Figure
-#     Figure containing RGB image, ground truth, and current prediction.
-#
-# Why this function exists
-# ------------------------
-# Numerical lines can improve even when a model collapses toward a generic centre
-# blob.  Inspecting the same validation examples every epoch reveals whether the
-# prediction actually responds to image content and whether spatial alignment is
-# correct.
-# =============================================================================
+# Save a fixed qualitative validation panel for the current model.
 @torch.inference_mode()
 def plot_prediction_panel(
     model: nn.Module,
@@ -1119,29 +622,8 @@ def plot_prediction_panel(
     return figure
 
 
-# =============================================================================
-# FUNCTION SCOPE: Detect a simple warning pattern consistent with overfitting.
-#
-# Parameters
-# ----------
-# history:
-#     Epoch history rows.
-# window:
-#     Number of latest epochs used for the warning.  Three is appropriate for the
-#     project's early-stopping patience.
-#
-# Returns
-# -------
-# bool
-#     True when training loss decreases across the window while validation loss
-#     increases and validation CC does not improve.
-#
-# Important limitation
-# --------------------
-# This is a diagnostic warning, not a scientific decision rule.  Early stopping
-# still uses the exact highest validation CC.  Curves and qualitative predictions
-# must be interpreted together.
-# =============================================================================
+# Detect a simple warning pattern consistent with overfitting.
+
 def detect_possible_overfitting(
     history: Sequence[Mapping[str, Any]],
     *,
@@ -1167,77 +649,9 @@ def detect_possible_overfitting(
 
     return train_decreasing and val_increasing and cc_not_improving
 
-
-# =============================================================================
-# FUNCTION SCOPE: Run the complete multi-epoch training and validation procedure.
-#
-# Parameters
-# ----------
-# model:
-#     Light-S, Light-M, or Heavy-M.
-# train_loader:
-#     Training DataLoader with shuffle=True.
-# val_loader:
-#     Validation DataLoader with shuffle=False.
-# optimizer:
-#     Optimizer returned by build_optimizer.
-# device:
-#     CPU or CUDA device.
-# model_name:
-#     Stable experiment name: light_single, light_multi, or heavy_multi.
-# epochs:
-#     Maximum total epoch number.  A resumed run continues until this total.
-# checkpoint_dir:
-#     Directory where best.pt and last.pt are written.
-# history_csv_path:
-#     CSV updated after every epoch.
-# curves_figure_path:
-#     Training-curves figure updated after every epoch.
-# preview_batch:
-#     Optional fixed validation batch for qualitative monitoring.
-# preview_figure_path:
-#     Optional figure path for the fixed prediction panel.
-# config:
-#     Experiment settings stored in checkpoints.
-# split_seed:
-#     Deterministic split seed, normally 42.
-# repo_root:
-#     Repository root used to record the Git commit.
-# patience:
-#     Stop after this many consecutive epochs without validation-CC improvement.
-# min_delta:
-#     Minimum CC increase required to count as an improvement.
-# freeze_encoder_epochs:
-#     Number of initial epochs during which encoder gradients are disabled.
-# freeze_encoder_batchnorm:
-#     Keep pretrained BatchNorm running statistics fixed during fine-tuning.
-# use_amp:
-#     Use CUDA automatic mixed precision when possible.
-# gradient_clip_norm:
-#     Maximum gradient norm, or None to disable clipping.
-# resume_from:
-#     Optional checkpoint path, usually last.pt, for interrupted Colab runs.
-# show_curves_each_epoch:
-#     Display the updated line plots after every epoch.
-#
-# Returns
-# -------
-# list[dict[str, Any]]
-#     Complete epoch history.  The best model remains saved in best.pt; the model
-#     object itself contains the final/last epoch weights when the function ends.
-#
-# Full epoch order
-# ----------------
-# 1. Freeze or unfreeze encoder according to the warm-up policy.
-# 2. Train one epoch.
-# 3. Validate on the fixed validation split.
-# 4. Append and save the CSV history.
-# 5. Save last.pt.
-# 6. Save best.pt only when validation CC improves.
-# 7. Update line plots and qualitative predictions.
-# 8. Print an overfitting warning when the recent curves show the pattern.
-# 9. Stop early after patience epochs without validation-CC improvement.
-# =============================================================================
+# ---------------------------------------------------------------------------------------
+# Run the complete multi-epoch training and validation procedure.
+# ----------------------------------------------------------------------------------------
 def fit_model(
     model: nn.Module,
     train_loader: DataLoader,
@@ -1474,37 +888,7 @@ def fit_model(
     return history
 
 
-# =============================================================================
-# FUNCTION SCOPE: Save final dataset-level and per-image evaluation results.
-#
-# Parameters
-# ----------
-# model:
-#     Model whose best checkpoint has already been loaded.
-# dataloader:
-#     Frozen validation/test DataLoader with shuffle=False.
-# device:
-#     CPU or CUDA device.
-# model_name:
-#     Stable model identifier added to every output row.
-# summary_csv_path:
-#     CSV destination for one dataset-level result row.
-# per_image_csv_path:
-#     Optional CSV destination for sample-level metrics.
-# use_amp:
-#     Enables CUDA autocast during evaluation.
-#
-# Returns
-# -------
-# tuple[dict[str, Any], pandas.DataFrame]
-#     Summary dictionary and per-image metric table.
-#
-# Why this function exists
-# ------------------------
-# Final evaluation should be reproducible and machine-readable.  Per-image scores
-# are needed later to select median/worst examples and to join scores with the
-# ground-truth centre-of-mass table for the off-centre study.
-# =============================================================================
+# Save final dataset-level and per-image evaluation results.
 def evaluate_and_save(
     model: nn.Module,
     dataloader: DataLoader,
