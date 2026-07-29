@@ -83,7 +83,7 @@ class ResNet18Encoder(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-    def farward(self, x: Tensor) -> FeatureDict:
+    def forward(self, x: Tensor) -> FeatureDict:
         x = self.stem(x)
         s4 = self.layer1(x)
         s8 = self.layer2(s4)
